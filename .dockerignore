@@ -1,0 +1,54 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# VinciPitch.AI - Docker Ignore
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info
+.eggs
+dist
+build
+*.egg
+.pytest_cache
+.mypy_cache
+.coverage
+htmlcov
+
+# Ambiente virtual
+venv
+env
+.venv
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# Testes
+tests
+test_*
+*_test.py
+
+# Docs
+docs
+*.md
+!README.md
+
+# Outros
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
