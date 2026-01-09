@@ -64,19 +64,23 @@ cors_origins = [
     "http://localhost:3001",
     "http://127.0.0.1:3001",
 
-    # Se/Quando subir o front (exemplos):
-    # "https://seu-front.vercel.app",
+    # ✅ Seu preview atual do Vercel (do erro do console)
+    "https://vincipich-emiybubbq-studiobeyonds-projects.vercel.app",
+
+    # (Opcional) se você tiver um domínio fixo/produção no Vercel, adicione aqui:
+    # "https://vincipich-frontend.vercel.app",
     # "https://www.seudominio.com",
 ]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
+    # ✅ Libera QUALQUER preview do Vercel: https://<qualquer-coisa>.vercel.app
+    allow_origin_regex=r"^https:\/\/.*\.vercel\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # ROTAS API
 # ═══════════════════════════════════════════════════════════════════════════════
