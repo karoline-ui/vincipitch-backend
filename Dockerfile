@@ -31,4 +31,5 @@ EXPOSE 8080
 
 # Comando para executar a aplicação
 # Cloud Run define a variável PORT automaticamente
-CMD exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
+
