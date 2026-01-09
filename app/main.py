@@ -3,10 +3,11 @@ VinciPitch.AI - API Principal
 Backend FastAPI para análise de startups com IA.
 """
 import os
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
-import logging
 
 from app.core.config import settings
 from app.routes import empresas_router, analises_router, rankings_router, exportacoes_router
@@ -33,9 +34,9 @@ app = FastAPI(
     version=settings.APP_VERSION,
     description="""
     ## VinciPitch.AI - Análise Inteligente de Startups
-    
+
     API para análise automatizada de startups usando IA.
-    
+
     ### Funcionalidades:
     - 📄 Upload de PDFs de startups
     - 🤖 Análise automatizada com IA (12 critérios)
@@ -49,11 +50,23 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS - Permitir origens do GCP
+# ═══════════════════════════════════════════════════════════════════════════════
+# CORS
+# IMPORTANTE:
+# - "Origin" é o FRONTEND (ex: localhost:3000/3001 ou Vercel)
+# - Se allow_credentials=True, NÃO use allow_origins=["*"]
+# ═══════════════════════════════════════════════════════════════════════════════
+
 cors_origins = [
+    # Next.js local
     "http://localhost:3000",
     "http://127.0.0.1:3000",
-    "https://vincipich-ai-897373535500.southamerica-east1.run.app",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+
+    # Se/Quando subir o front (exemplos):
+    # "https://seu-front.vercel.app",
+    # "https://www.seudominio.com",
 ]
 
 app.add_middleware(
@@ -64,14 +77,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ROTAS API
+# ═══════════════════════════════════════════════════════════════════════════════
 
-# Rotas
 app.include_router(empresas_router, prefix="/api/v1")
 app.include_router(analises_router, prefix="/api/v1")
 app.include_router(rankings_router, prefix="/api/v1")
 app.include_router(exportacoes_router, prefix="/api/v1")
-
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ROTAS BASE / GCP
@@ -89,19 +102,13 @@ async def root():
 
 @app.get("/health")
 async def health():
-    """
-    Health check para GCP Cloud Run / Load Balancer.
-    Retorna status da aplicação.
-    """
+    """Health check para GCP Cloud Run / Load Balancer."""
     return {"ok": True, "status": "healthy"}
 
 
 @app.get("/whoami")
 async def whoami():
-    """
-    Informações do ambiente para debug.
-    Útil para verificar deploy no GCP.
-    """
+    """Informações do ambiente para debug."""
     return {
         "app": settings.APP_NAME,
         "version": settings.APP_VERSION,
@@ -116,30 +123,23 @@ async def whoami():
 
 @app.get("/readiness")
 async def readiness():
-    """
-    Readiness check - verifica se a aplicação está pronta para receber tráfego.
-    Usado pelo Kubernetes/Cloud Run.
-    """
-    # Aqui poderia verificar conexão com Supabase, etc.
+    """Readiness check."""
     return {"ready": True}
 
 
 @app.get("/liveness")
 async def liveness():
-    """
-    Liveness check - verifica se a aplicação está viva.
-    Usado pelo Kubernetes/Cloud Run.
-    """
+    """Liveness check."""
     return {"alive": True}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# EXECUÇÃO
+# EXECUÇÃO LOCAL
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8000))  # GCP Cloud Run usa PORT
+    port = int(os.getenv("PORT", 8000))  # Cloud Run usa PORT=8080, local pode ser 8000
     uvicorn.run(
         "app.main:app",
         host="0.0.0.0",
