@@ -72,6 +72,7 @@ app.include_router(rankings_router, prefix="/api/v1")
 app.include_router(exportacoes_router, prefix="/api/v1")
 
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # ROTAS BASE / GCP
 # ═══════════════════════════════════════════════════════════════════════════════
