@@ -50,17 +50,20 @@ app = FastAPI(
 )
 
 # CORS - Permitir origens do GCP
-cors_origins = settings.CORS_ORIGINS + [
-    "https://*.run.app",  # Cloud Run
-    "https://*.appspot.com",  # App Engine
+cors_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://vincipich-ai-897373535500.southamerica-east1.run.app",
 ]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Em produção, restringir
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # Rotas
 app.include_router(empresas_router, prefix="/api/v1")
