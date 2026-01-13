@@ -3,6 +3,7 @@
 VINCIPITCH.AI - AGENTE AVALIADOR DE STARTUPS
 ═══════════════════════════════════════════════════════════════════════════════
 Agente principal que avalia startups com base no pitch/questionário
+Utiliza prompts específicos por setor com métricas e KPIs do mercado
 """
 
 import json
@@ -12,135 +13,225 @@ from typing import Dict, Any, Optional
 from openai import AsyncOpenAI
 
 from ..core.config import get_settings, CRITERIOS_PADRAO, PESOS_PADRAO
+from .config_setores import get_config_setor, METRICAS_POR_SETOR
 
 logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PROMPTS
+# PROMPTS ESPECÍFICOS POR SETOR
 # ═══════════════════════════════════════════════════════════════════════════════
 
-SYSTEM_PROMPT_AVALIADOR = """Você é um ANALISTA SÊNIOR DE VENTURE CAPITAL especializado em avaliações técnicas de startups.
-
-{system_prompt_setor}
+def gerar_system_prompt(setor: str) -> str:
+    """Gera system prompt específico para o setor"""
+    config = get_config_setor(setor)
+    
+    kpis_texto = "\n".join([f"  • {kpi}" for kpi in config['kpis_principais']])
+    
+    benchmarks_texto = ""
+    for key, value in config['benchmarks'].items():
+        nome = key.replace("_", " ").title()
+        if isinstance(value, float):
+            if value < 1:
+                benchmarks_texto += f"  • {nome}: {value*100:.0f}%\n"
+            else:
+                benchmarks_texto += f"  • {nome}: {value}x\n"
+        else:
+            benchmarks_texto += f"  • {nome}: {value}\n"
+    
+    perguntas_texto = "\n".join([f"  • {p}" for p in config['perguntas_avaliacao']])
+    
+    return f"""Você é um ANALISTA SÊNIOR DE VENTURE CAPITAL especializado em {config['nome_display']}.
 
 ═══════════════════════════════════════════════════════════════════════════════
-ESCALA DE AVALIAÇÃO (0-4):
+🎯 EXPERTISE: {config['nome_display'].upper()}
 ═══════════════════════════════════════════════════════════════════════════════
 
-**4 = EXCEPCIONAL** (top 5-10%)
-- Validação comprovada em campo
-- Alinhamento forte a frameworks internacionais
-- Tração real (clientes, parcerias formalizadas, MRR)
-- Inovação diferenciada com IP
+Setor: {config['descricao']}
 
-**3 = BOM/SÓLIDO** (top 30%)
-- Base técnica sólida com evidências parciais
-- Alinhamento a frameworks (mesmo sem certificação final)
-- Piloto realizado OU parcerias em desenvolvimento
-- Diferenciação clara e fundamentada
+📊 KPIs CRÍTICOS QUE VOCÊ DEVE AVALIAR:
+{kpis_texto}
 
-**2 = ADEQUADO** (média - 50%)
-- Ideia coerente mas sem validação forte
-- Menciona frameworks mas sem evidências
-- Sem tração comercial clara
-- Diferenciação genérica
+📈 BENCHMARKS DO MERCADO:
+{benchmarks_texto}
 
-**1 = FRACO** (bottom 30%)
+❓ PERGUNTAS-CHAVE PARA AVALIAR {config['nome_display'].upper()}:
+{perguntas_texto}
+
+═══════════════════════════════════════════════════════════════════════════════
+⚖️ ESCALA DE AVALIAÇÃO (0-4):
+═══════════════════════════════════════════════════════════════════════════════
+
+**4.0 = EXCEPCIONAL** (top 5% do setor)
+- KPIs acima dos benchmarks de mercado
+- Tração comprovada (clientes pagantes, MRR, parcerias formalizadas)
+- Diferenciação tecnológica ou de modelo de negócio clara
+- Equipe com track record no setor
+- Validação regulatória/certificações quando aplicável
+
+**3.0-3.9 = BOM/SÓLIDO** (top 25%)
+- KPIs alinhados ou próximos aos benchmarks
+- Piloto realizado com resultados mensuráveis
+- Proposta de valor diferenciada e fundamentada
+- Equipe com experiência relevante
+- Processo regulatório em andamento quando aplicável
+
+**2.0-2.9 = ADEQUADO** (mediana)
+- Ideia coerente mas KPIs não demonstrados ou abaixo do benchmark
+- Sem validação forte de mercado
+- Diferenciação genérica ou pouco clara
+- Equipe com gaps importantes
+- Sem clareza sobre aspectos regulatórios
+
+**1.0-1.9 = FRACO** (bottom 25%)
 - Conceito vago ou mal fundamentado
-- Sem alinhamento regulatório
-- Sem evidências ou tração
+- Sem métricas ou evidências
+- Mercado mal definido
+- Modelo de negócio questionável
 
-**0 = MUITO FRACO** (bottom 10%)
-- Inviável ou totalmente inadequado
+**0-0.9 = MUITO FRACO** (bottom 5%)
+- Proposta inviável ou inadequada para o setor
+- Desconhecimento do mercado
+- Riscos críticos não endereçados
 
 ═══════════════════════════════════════════════════════════════════════════════
-REGRAS DE AVALIAÇÃO:
+⚠️ REGRAS CRÍTICAS DE AVALIAÇÃO:
 ═══════════════════════════════════════════════════════════════════════════════
 
-1. Seja TÉCNICO e FUNDAMENTADO
-2. RECONHEÇA qualidade quando existe
-3. Distribua notas de forma VARIADA (não tudo 2)
-4. Justifique CADA nota com evidências do texto
-5. Considere critérios ESPECÍFICOS do setor
+1. USE DECIMAIS (ex: 2.3, 3.7, 1.5) - NÃO apenas números inteiros
+2. DISTRIBUA as notas - é IMPOSSÍVEL uma startup ter todas as notas iguais
+3. COMPARE com os benchmarks do setor ao avaliar
+4. PENALIZE severamente quando KPIs críticos do setor não são mencionados
+5. RECOMPENSE quando há métricas concretas e validação de mercado
+6. Cada critério deve ter uma justificativa ESPECÍFICA de 2-3 frases
 
 Você DEVE retornar um JSON válido com a estrutura especificada."""
 
 
-HUMAN_PROMPT_AVALIACAO = """Analise este questionário/pitch de startup e avalie cada critério.
+def gerar_criterios_setor(setor: str) -> str:
+    """Gera texto com critérios específicos do setor"""
+    config = get_config_setor(setor)
+    
+    texto = f"\n═══════════════════════════════════════════════════════════════════════════════\n"
+    texto += f"🎯 CRITÉRIOS ESPECÍFICOS PARA {config['nome_display'].upper()}:\n"
+    texto += f"═══════════════════════════════════════════════════════════════════════════════\n\n"
+    
+    criterios_map = {
+        "sumario_executivo": "Sumário Executivo",
+        "proposta_valor": "Proposta de Valor",
+        "concorrencia": "Concorrência",
+        "mercado_alvo": "Mercado Alvo",
+        "canais_distribuicao": "Canais de Distribuição",
+        "relacionamento_clientes": "Relacionamento com Clientes",
+        "fontes_receita": "Fontes de Receita",
+        "recursos_principais": "Recursos Principais",
+        "atividades_chave": "Atividades-Chave",
+        "parceiros": "Parceiros",
+        "estrutura_custos": "Estrutura de Custos",
+        "referencias_indicacao": "Referências de Indicação"
+    }
+    
+    for key, nome in criterios_map.items():
+        descricao = config['criterios_especificos'].get(key, "Avaliar conforme padrão")
+        texto += f"• **{nome}**: {descricao}\n"
+    
+    return texto
+
+
+HUMAN_PROMPT_AVALIACAO = """Analise este questionário/pitch de startup e avalie cada critério com base nas métricas e KPIs específicos do setor.
 
 ═══════════════════════════════════════════════════════════════════════════════
-CONTEÚDO DO PITCH:
+📄 CONTEÚDO DO PITCH:
 ═══════════════════════════════════════════════════════════════════════════════
 
 {conteudo_pitch}
 
 ═══════════════════════════════════════════════════════════════════════════════
-CRITÉRIOS A AVALIAR:
+📋 CRITÉRIOS GERAIS A AVALIAR:
 ═══════════════════════════════════════════════════════════════════════════════
 
-1. **Sumário Executivo**: Problema validado, solução específica, tração
-2. **Proposta de Valor**: Diferenciação, benefícios quantificados, barreira defensável
-3. **Concorrência**: Análise profunda, concorrentes nomeados, estratégia competitiva
-4. **Mercado Alvo**: TAM/SAM/SOM com fontes, segmentação, tendências
+1. **Sumário Executivo**: Problema validado, solução específica, tração demonstrada
+2. **Proposta de Valor**: Diferenciação clara, benefícios quantificados, barreira defensável
+3. **Concorrência**: Análise profunda com nomes, estratégia competitiva clara
+4. **Mercado Alvo**: TAM/SAM/SOM com fontes, segmentação clara, tendências
 5. **Canais de Distribuição**: Canais específicos, CAC conhecido, estratégia de escala
-6. **Relacionamento com Clientes**: LTV conhecido, NPS, programa de fidelização
-7. **Fontes de Receita**: Modelo claro, pricing validado, múltiplas fontes
-8. **Recursos Principais**: IP protegido, tecnologia validada, equipe forte
+6. **Relacionamento com Clientes**: LTV conhecido, NPS, estratégia de retenção
+7. **Fontes de Receita**: Modelo claro, pricing validado, unit economics
+8. **Recursos Principais**: IP, tecnologia, equipe, certificações
 9. **Atividades-Chave**: Processos detalhados, roadmap com milestones
-10. **Parceiros**: Parcerias FORMALIZADAS com nomes específicos
+10. **Parceiros**: Parcerias FORMALIZADAS (nomes específicos, contratos)
 11. **Estrutura de Custos**: COGS detalhado, burn rate, runway
 12. **Referências de Indicação**: Clientes pagantes, MRR/ARR, cases documentados
 
 {criterios_setor}
 
 ═══════════════════════════════════════════════════════════════════════════════
-FORMATO DE RESPOSTA (JSON):
+📝 FORMATO DE RESPOSTA (JSON):
 ═══════════════════════════════════════════════════════════════════════════════
 
-IMPORTANTE: Você DEVE preencher TODAS as 12 justificativas com pelo menos 2 frases cada.
-Cada justificativa deve explicar especificamente o porquê da nota atribuída.
+REGRAS IMPORTANTES:
+1. Use DECIMAIS nas notas (ex: 2.3, 3.7, 1.5) - NÃO apenas números inteiros
+2. As notas DEVEM variar entre os critérios - é impossível todos serem iguais
+3. Compare SEMPRE com os KPIs e benchmarks do setor mencionados no system prompt
+4. Cada justificativa deve ter 2-3 frases explicando a nota com base no pitch
 
-Retorne APENAS um JSON válido neste formato exato:
+Retorne APENAS um JSON válido neste formato:
 
 {{
   "empresa": "Nome da empresa identificado no pitch",
-  "setor": "Setor identificado (healthtech, fintech, edtech, etc)",
-  "sumario_executivo": 2.5,
-  "proposta_valor": 3.0,
-  "concorrencia": 2.0,
-  "mercado_alvo": 2.5,
-  "canais_distribuicao": 2.0,
-  "relacionamento_clientes": 2.5,
-  "fontes_receita": 3.0,
-  "recursos_principais": 2.5,
-  "atividades_chave": 2.0,
-  "parceiros": 2.0,
-  "estrutura_custos": 2.5,
-  "referencias_indicacao": 2.0,
-  "justificativa_sumario": "OBRIGATÓRIO: Explique detalhadamente por que deu esta nota ao sumário executivo, citando evidências do pitch.",
-  "justificativa_proposta": "OBRIGATÓRIO: Explique detalhadamente por que deu esta nota à proposta de valor, citando evidências do pitch.",
-  "justificativa_concorrencia": "OBRIGATÓRIO: Explique detalhadamente por que deu esta nota à análise de concorrência, citando evidências do pitch.",
-  "justificativa_mercado": "OBRIGATÓRIO: Explique detalhadamente por que deu esta nota ao mercado alvo, citando evidências do pitch.",
-  "justificativa_canais": "OBRIGATÓRIO: Explique detalhadamente por que deu esta nota aos canais de distribuição, citando evidências do pitch.",
-  "justificativa_relacionamento": "OBRIGATÓRIO: Explique detalhadamente por que deu esta nota ao relacionamento com clientes, citando evidências do pitch.",
-  "justificativa_receita": "OBRIGATÓRIO: Explique detalhadamente por que deu esta nota às fontes de receita, citando evidências do pitch.",
-  "justificativa_recursos": "OBRIGATÓRIO: Explique detalhadamente por que deu esta nota aos recursos principais, citando evidências do pitch.",
-  "justificativa_atividades": "OBRIGATÓRIO: Explique detalhadamente por que deu esta nota às atividades-chave, citando evidências do pitch.",
-  "justificativa_parceiros": "OBRIGATÓRIO: Explique detalhadamente por que deu esta nota aos parceiros, citando evidências do pitch.",
-  "justificativa_custos": "OBRIGATÓRIO: Explique detalhadamente por que deu esta nota à estrutura de custos, citando evidências do pitch.",
-  "justificativa_referencias": "OBRIGATÓRIO: Explique detalhadamente por que deu esta nota às referências/indicação, citando evidências do pitch.",
-  "nota_final": 2.5
+  "setor": "{setor}",
+  "sumario_executivo": 2.7,
+  "proposta_valor": 3.2,
+  "concorrencia": 1.8,
+  "mercado_alvo": 2.4,
+  "canais_distribuicao": 2.1,
+  "relacionamento_clientes": 2.9,
+  "fontes_receita": 3.5,
+  "recursos_principais": 2.6,
+  "atividades_chave": 2.2,
+  "parceiros": 1.5,
+  "estrutura_custos": 2.3,
+  "referencias_indicacao": 1.9,
+  "justificativa_sumario": "Justificativa detalhada de 2-3 frases explicando a nota, citando evidências específicas do pitch e comparando com KPIs do setor.",
+  "justificativa_proposta": "Justificativa detalhada...",
+  "justificativa_concorrencia": "Justificativa detalhada...",
+  "justificativa_mercado": "Justificativa detalhada...",
+  "justificativa_canais": "Justificativa detalhada...",
+  "justificativa_relacionamento": "Justificativa detalhada...",
+  "justificativa_receita": "Justificativa detalhada...",
+  "justificativa_recursos": "Justificativa detalhada...",
+  "justificativa_atividades": "Justificativa detalhada...",
+  "justificativa_parceiros": "Justificativa detalhada...",
+  "justificativa_custos": "Justificativa detalhada...",
+  "justificativa_referencias": "Justificativa detalhada...",
+  "nota_final": 2.43
 }}
 
-IMPORTANTE: Retorne APENAS o JSON, sem texto adicional antes ou depois. TODAS as 12 justificativas são OBRIGATÓRIAS."""
+IMPORTANTE: 
+- A nota_final deve ser a MÉDIA EXATA das 12 notas (calcule corretamente)
+- Use notas com UMA casa decimal (ex: 2.3, não 2.33333)
+- TODAS as 12 justificativas são OBRIGATÓRIAS
+- Retorne APENAS o JSON, sem texto antes ou depois"""
 
 
-SYSTEM_PROMPT_DIAGNOSTICO = """Você é um CONSULTOR ESTRATÉGICO DE VENTURE CAPITAL.
+# ═══════════════════════════════════════════════════════════════════════════════
+# PROMPTS DE DIAGNÓSTICO (específico por setor)
+# ═══════════════════════════════════════════════════════════════════════════════
 
-Com base nas notas e avaliação de uma startup, você deve gerar um diagnóstico estratégico completo.
+def gerar_system_prompt_diagnostico(setor: str) -> str:
+    """Gera system prompt de diagnóstico específico para o setor"""
+    config = get_config_setor(setor)
+    
+    return f"""Você é um CONSULTOR ESTRATÉGICO DE VENTURE CAPITAL especializado em {config['nome_display']}.
 
-Seja direto, técnico e acionável. Suas recomendações devem ser específicas e práticas.
+Com base nas notas e avaliação de uma startup do setor de {config['nome_display']}, você deve gerar um diagnóstico estratégico completo.
+
+CONTEXTO DO SETOR: {config['descricao']}
+
+KPIs IMPORTANTES PARA O DIAGNÓSTICO:
+{chr(10).join([f"• {kpi}" for kpi in config['kpis_principais'][:5]])}
+
+Seja direto, técnico e acionável. Suas recomendações devem ser específicas para o setor de {config['nome_display']} e práticas.
 
 Retorne APENAS um JSON válido."""
 
@@ -148,14 +239,14 @@ Retorne APENAS um JSON válido."""
 HUMAN_PROMPT_DIAGNOSTICO = """Com base nesta avaliação, gere um diagnóstico estratégico completo:
 
 ═══════════════════════════════════════════════════════════════════════════════
-DADOS DA EMPRESA:
+📊 DADOS DA EMPRESA:
 ═══════════════════════════════════════════════════════════════════════════════
 
 Nome: {empresa}
 Setor: {setor}
 
 ═══════════════════════════════════════════════════════════════════════════════
-NOTAS RECEBIDAS:
+📈 NOTAS RECEBIDAS:
 ═══════════════════════════════════════════════════════════════════════════════
 
 - Sumário Executivo: {nota_sumario}/4
@@ -174,126 +265,198 @@ NOTAS RECEBIDAS:
 **NOTA FINAL: {nota_final}/4**
 
 ═══════════════════════════════════════════════════════════════════════════════
-FORMATO DE RESPOSTA (JSON):
+📝 FORMATO DE RESPOSTA (JSON):
 ═══════════════════════════════════════════════════════════════════════════════
 
-Retorne APENAS um JSON válido neste formato:
+Gere recomendações ESPECÍFICAS para o setor {setor}. Retorne APENAS um JSON válido:
 
 {{
   "empresa": "{empresa}",
   "setor": "{setor}",
-  "pontos_fortes": ["Ponto forte 1", "Ponto forte 2", "Ponto forte 3"],
-  "pontos_fracos": ["Ponto fraco 1", "Ponto fraco 2", "Ponto fraco 3"],
-  "oportunidades": ["Oportunidade 1", "Oportunidade 2"],
-  "ameacas": ["Ameaça 1", "Ameaça 2"],
-  "recomendacoes": ["Recomendação específica 1", "Recomendação específica 2", "Recomendação específica 3"],
-  "proximos_passos": ["Próximo passo 1", "Próximo passo 2"],
-  "resumo_executivo": "Resumo de 2-3 parágrafos sobre a startup...",
-  "classificacao_potencial": "alto",
-  "classificacao_risco": "medio",
-  "recomendacao_investimento": "acompanhar",
+  "pontos_fortes": ["3 pontos fortes específicos baseados nas notas altas"],
+  "pontos_fracos": ["3 pontos fracos específicos baseados nas notas baixas"],
+  "oportunidades": ["2-3 oportunidades de mercado específicas do setor"],
+  "ameacas": ["2-3 ameaças ou riscos específicos do setor"],
+  "recomendacoes": ["5 recomendações estratégicas práticas e específicas para o setor"],
+  "proximos_passos": ["3 ações imediatas priorizadas"],
+  "resumo_executivo": "Parágrafo de 3-4 frases com visão geral da startup, potencial e principais desafios",
+  "classificacao_potencial": "alto|medio|baixo",
+  "classificacao_risco": "alto|medio|baixo", 
+  "recomendacao_investimento": "investir|considerar|declinar",
   "nota_final": {nota_final}
 }}
 
-IMPORTANTE: Retorne APENAS o JSON, sem texto adicional."""
+IMPORTANTE: Retorne APENAS o JSON, sem texto antes ou depois."""
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# AGENTE AVALIADOR
+# CLASSE AGENTE AVALIADOR
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class AgenteAvaliador:
-    """Agente responsável por avaliar startups usando OpenAI diretamente"""
+    """
+    Agente responsável por avaliar pitches de startups.
+    Utiliza prompts específicos por setor com KPIs e métricas de mercado.
+    """
     
-    def __init__(self, config_setor: Optional[Dict] = None):
+    def __init__(self, config_setor: Dict[str, Any] = None):
         self.settings = get_settings()
-        self.config_setor = config_setor or {}
-        
-        # Inicializa cliente OpenAI
         self.client = AsyncOpenAI(api_key=self.settings.OPENAI_API_KEY)
-        self.model = self.config_setor.get("modelo_ia", self.settings.OPENAI_MODEL)
-        self.temperature = self.config_setor.get("temperatura", self.settings.OPENAI_TEMPERATURE)
+        self.model = self.settings.OPENAI_MODEL
+        self.config_setor = config_setor or {}
     
-    async def avaliar(self, conteudo_pitch: str, max_retries: int = 3) -> Dict[str, Any]:
+    async def avaliar(
+        self, 
+        conteudo_pitch: str,
+        setor_hint: str = None,
+        max_retries: int = 3
+    ) -> Dict[str, Any]:
         """
-        Avalia um pitch de startup
+        Avalia um pitch de startup usando prompts específicos do setor.
         
         Args:
-            conteudo_pitch: Texto extraído do PDF/documento
+            conteudo_pitch: Texto do pitch/questionário da startup
+            setor_hint: Dica do setor (se conhecido previamente)
             max_retries: Número máximo de tentativas
             
         Returns:
-            Dicionário com avaliação completa
+            Dicionário com notas e justificativas para cada critério
         """
-        # Limita tamanho do conteúdo
+        if not conteudo_pitch or len(conteudo_pitch.strip()) < 50:
+            return self._resultado_erro("Conteúdo do pitch muito curto ou vazio")
+        
+        # Detecta ou usa setor fornecido
+        setor = setor_hint or self._detectar_setor(conteudo_pitch)
+        
+        # Prepara conteúdo (resume se muito longo)
         if len(conteudo_pitch) > 15000:
             conteudo_pitch = self._resumir_conteudo(conteudo_pitch)
         
-        # Monta prompts
-        system_prompt_setor = self.config_setor.get(
-            "system_prompt", 
-            "Avalie como um VC experiente que reconhece qualidade técnica e maturidade."
-        )
+        # Gera prompts específicos do setor
+        system_prompt = gerar_system_prompt(setor)
+        criterios_setor = gerar_criterios_setor(setor)
         
-        criterios_setor = ""
-        if self.config_setor.get("criterios_especificos"):
-            criterios = self.config_setor["criterios_especificos"]
-            criterios_setor = "\n═══ CRITÉRIOS ESPECÍFICOS DO SETOR ═══\n"
-            for c in criterios:
-                criterios_setor += f"- **{c['nome']}** (peso: {c.get('peso', 10)}): {c.get('descricao', '')}\n"
-        
-        system_content = SYSTEM_PROMPT_AVALIADOR.format(system_prompt_setor=system_prompt_setor)
         user_content = HUMAN_PROMPT_AVALIACAO.format(
             conteudo_pitch=conteudo_pitch,
-            criterios_setor=criterios_setor
+            criterios_setor=criterios_setor,
+            setor=setor
         )
         
-        # Tenta com retries
         last_error = None
         for attempt in range(max_retries):
             try:
-                logger.info(f"Tentativa {attempt + 1}/{max_retries} de avaliação")
+                logger.info(f"Avaliação - Tentativa {attempt + 1}/{max_retries} - Setor: {setor}")
                 
                 response = await self.client.chat.completions.create(
                     model=self.model,
-                    temperature=self.temperature,
+                    temperature=0.3,  # Baixa para consistência, mas permite variação
                     messages=[
-                        {"role": "system", "content": system_content},
+                        {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_content}
                     ],
                     response_format={"type": "json_object"}
                 )
                 
                 content = response.choices[0].message.content
-                logger.info(f"Resposta recebida da OpenAI: {len(content)} chars")
-                
-                # Parse JSON
                 resultado = json.loads(content)
                 
-                # Calcula nota final se não veio
-                if "nota_final" not in resultado or resultado["nota_final"] == 0:
-                    resultado["nota_final"] = self.calcular_nota_final(resultado)
+                # Valida e recalcula nota final
+                resultado = self._validar_e_ajustar_resultado(resultado, setor)
                 
+                logger.info(f"Avaliação concluída: {resultado.get('empresa')} - Nota: {resultado.get('nota_final')}")
                 return resultado
                 
             except json.JSONDecodeError as e:
-                logger.error(f"Erro ao parsear JSON: {e}")
+                logger.error(f"Erro de JSON na tentativa {attempt + 1}: {e}")
                 last_error = e
                 # Tenta extrair JSON manualmente
                 try:
-                    return self._extrair_json_manual(content)
+                    resultado = self._extrair_json_manual(response.choices[0].message.content)
+                    resultado = self._validar_e_ajustar_resultado(resultado, setor)
+                    return resultado
                 except:
                     pass
                     
             except Exception as e:
                 logger.error(f"Erro na tentativa {attempt + 1}: {e}")
                 last_error = e
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(2 ** attempt)  # Backoff exponencial
+                
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2 ** attempt)
         
-        # Se todas as tentativas falharam
         logger.error(f"Todas as tentativas falharam: {last_error}")
         return self._resultado_erro(str(last_error))
+    
+    def _detectar_setor(self, texto: str) -> str:
+        """Detecta o setor da startup baseado no conteúdo"""
+        texto_lower = texto.lower()
+        
+        setores_keywords = {
+            "fintech": ["fintech", "financeiro", "pagamento", "crédito", "banco", "pix", "cartão", "empréstimo", "investimento"],
+            "healthtech": ["healthtech", "saúde", "médico", "hospital", "telemedicina", "paciente", "clínica", "diagnóstico"],
+            "edtech": ["edtech", "educação", "ensino", "curso", "escola", "aluno", "aprendizado", "treinamento"],
+            "construtech": ["construtech", "construção", "obra", "construtora", "engenharia civil", "bim", "incorporadora"],
+            "agrotech": ["agrotech", "agro", "agricultura", "fazenda", "produtor rural", "safra", "pecuária"],
+            "retailtech": ["retailtech", "varejo", "e-commerce", "loja", "marketplace", "comércio"],
+            "logtech": ["logtech", "logística", "entrega", "frete", "transporte", "supply chain"],
+            "hrtech": ["hrtech", "rh", "recrutamento", "funcionário", "contratação", "gestão de pessoas"],
+            "legaltech": ["legaltech", "jurídico", "advocacia", "contrato", "compliance"],
+            "insurtech": ["insurtech", "seguro", "sinistro", "apólice", "cobertura"],
+            "proptech": ["proptech", "imobiliário", "imóvel", "aluguel", "compra e venda"],
+            "foodtech": ["foodtech", "alimentação", "delivery", "restaurante", "comida"],
+            "martech": ["martech", "marketing", "publicidade", "mídia", "automação de marketing"],
+            "cleantech": ["cleantech", "energia", "solar", "sustentável", "carbono", "renovável"],
+        }
+        
+        scores = {}
+        for setor, keywords in setores_keywords.items():
+            score = sum(1 for kw in keywords if kw in texto_lower)
+            if score > 0:
+                scores[setor] = score
+        
+        if scores:
+            return max(scores, key=scores.get)
+        
+        return "outro"
+    
+    def _validar_e_ajustar_resultado(self, resultado: Dict[str, Any], setor: str) -> Dict[str, Any]:
+        """Valida e ajusta o resultado da avaliação"""
+        criterios = [
+            "sumario_executivo", "proposta_valor", "concorrencia", "mercado_alvo",
+            "canais_distribuicao", "relacionamento_clientes", "fontes_receita",
+            "recursos_principais", "atividades_chave", "parceiros",
+            "estrutura_custos", "referencias_indicacao"
+        ]
+        
+        # Garante que todas as notas existem e estão no range correto
+        notas = []
+        for criterio in criterios:
+            nota = resultado.get(criterio, 2.0)
+            if nota is None:
+                nota = 2.0
+            nota = max(0, min(4, float(nota)))
+            resultado[criterio] = round(nota, 1)
+            notas.append(resultado[criterio])
+        
+        # Recalcula nota final como média
+        resultado['nota_final'] = round(sum(notas) / len(notas), 2)
+        
+        # Garante setor
+        resultado['setor'] = setor
+        
+        # Garante justificativas padrão se ausentes
+        justificativas = [
+            "justificativa_sumario", "justificativa_proposta", "justificativa_concorrencia",
+            "justificativa_mercado", "justificativa_canais", "justificativa_relacionamento",
+            "justificativa_receita", "justificativa_recursos", "justificativa_atividades",
+            "justificativa_parceiros", "justificativa_custos", "justificativa_referencias"
+        ]
+        
+        for just in justificativas:
+            if not resultado.get(just):
+                resultado[just] = "Justificativa não fornecida pela IA."
+        
+        return resultado
     
     def _resumir_conteudo(self, texto: str) -> str:
         """Resume conteúdo muito longo mantendo informações relevantes"""
@@ -302,7 +465,8 @@ class AgenteAvaliador:
             'receita', 'faturamento', 'financeiro', 'investimento', 'capital',
             'equipe', 'fundador', 'tecnologia', 'inovação', 'diferencial',
             'crescimento', 'tração', 'competidor', 'estratégia', 'objetivo',
-            'patente', 'certificação', 'regulatório', 'parceria'
+            'patente', 'certificação', 'regulatório', 'parceria', 'cac', 'ltv',
+            'mrr', 'arr', 'churn', 'nps', 'kpi', 'métrica', 'benchmark'
         ]
         
         sentences = texto.replace('\n', ' ').split('.')
@@ -398,7 +562,7 @@ class AgenteAvaliador:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class AgenteDiagnostico:
-    """Agente responsável por gerar diagnóstico estratégico"""
+    """Agente responsável por gerar diagnóstico estratégico específico do setor"""
     
     def __init__(self):
         self.settings = get_settings()
@@ -407,7 +571,8 @@ class AgenteDiagnostico:
     
     async def diagnosticar(self, avaliacao: Dict[str, Any], max_retries: int = 3) -> Dict[str, Any]:
         """
-        Gera diagnóstico estratégico baseado na avaliação
+        Gera diagnóstico estratégico baseado na avaliação.
+        Usa prompts específicos do setor.
         
         Args:
             avaliacao: Resultado da avaliação do agente avaliador
@@ -416,9 +581,12 @@ class AgenteDiagnostico:
         Returns:
             Dicionário com diagnóstico completo
         """
+        setor = avaliacao.get("setor", "outro")
+        system_prompt = gerar_system_prompt_diagnostico(setor)
+        
         user_content = HUMAN_PROMPT_DIAGNOSTICO.format(
             empresa=avaliacao.get("empresa", "N/A"),
-            setor=avaliacao.get("setor", "N/A"),
+            setor=setor,
             nota_sumario=avaliacao.get("sumario_executivo", 0),
             nota_proposta=avaliacao.get("proposta_valor", 0),
             nota_concorrencia=avaliacao.get("concorrencia", 0),
@@ -437,13 +605,13 @@ class AgenteDiagnostico:
         last_error = None
         for attempt in range(max_retries):
             try:
-                logger.info(f"Tentativa {attempt + 1}/{max_retries} de diagnóstico")
+                logger.info(f"Diagnóstico - Tentativa {attempt + 1}/{max_retries} - Setor: {setor}")
                 
                 response = await self.client.chat.completions.create(
                     model=self.model,
                     temperature=0.4,
                     messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT_DIAGNOSTICO},
+                        {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_content}
                     ],
                     response_format={"type": "json_object"}
@@ -451,6 +619,8 @@ class AgenteDiagnostico:
                 
                 content = response.choices[0].message.content
                 resultado = json.loads(content)
+                
+                logger.info(f"Diagnóstico concluído: {resultado.get('empresa')}")
                 return resultado
                 
             except Exception as e:
@@ -479,3 +649,17 @@ class AgenteDiagnostico:
             "recomendacao_investimento": "declinar",
             "nota_final": avaliacao.get("nota_final", 0)
         }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FUNÇÕES AUXILIARES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def get_setores_disponiveis() -> list:
+    """Retorna lista de setores disponíveis para avaliação"""
+    return list(METRICAS_POR_SETOR.keys())
+
+
+def get_info_setor(setor: str) -> Dict[str, Any]:
+    """Retorna informações completas sobre um setor"""
+    return get_config_setor(setor)
