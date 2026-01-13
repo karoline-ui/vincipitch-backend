@@ -53,7 +53,7 @@ class SupabaseService:
             if filtros.get("estagio"):
                 query = query.eq("estagio", filtros["estagio"])
             if filtros.get("faturamento_minimo"):
-                query = query.gte("faturamento_anual", filtros["faturamento_minimo"])
+                query = query.gte("faturamento_anual", filtros["filtros_minimo"])
             if filtros.get("busca"):
                 query = query.ilike("nome", f"%{filtros['busca']}%")
 
@@ -179,14 +179,14 @@ class SupabaseService:
 
     async def listar_analises(self, filtros: dict = None, limite: int = 20, offset: int = 0):
         query = self.client.table("analises").select("*")
-        
+
         if filtros:
             if filtros.get("status"):
                 query = query.eq("status", filtros["status"])
             if filtros.get("setor"):
                 # Precisa fazer join com empresas para filtrar por setor
                 pass
-        
+
         query = query.order("created_at", desc=True).range(offset, offset + limite - 1)
         result = query.execute()
         return result.data if result.data else []
@@ -220,34 +220,49 @@ class SupabaseService:
     # ═══════════════════════════════════════════════════════════════════════════
 
     async def obter_ranking_geral(self, limite: int = 50, offset: int = 0):
-        """Obtém ranking geral de empresas ordenado por nota final (sem duplicatas)"""
+        """
+        Obtém ranking geral de empresas.
+
+        ✅ CORREÇÃO: garante SEMPRE a análise mais recente por empresa.
+        - Busca por created_at desc (recência)
+        - Deduplica por empresa_id (fica só a mais recente)
+        - Depois ordena por nota_final desc (ranking)
+        """
         try:
-            # Busca análises com join de empresas
+            # 1) Busca análises concluídas com join de empresas ORDENANDO POR RECÊNCIA
             result = (
                 self.client.table("analises")
                 .select("*, empresas(*)")
                 .eq("status", "concluida")
-                .order("nota_final", desc=True)
+                .order("created_at", desc=True)
                 .execute()
             )
-            
-            # Remove duplicatas - mantém apenas a análise mais recente por empresa
+
+            # 2) Deduplica: mantém apenas a análise mais recente por empresa
             empresas_vistas = set()
-            items = []
-            notas = []
-            
+            analises_unicas = []
             for analise in (result.data or []):
                 empresa_id = analise.get("empresa_id")
-                
-                # Pula se já vimos essa empresa
+                if not empresa_id:
+                    continue
                 if empresa_id in empresas_vistas:
                     continue
-                    
                 empresas_vistas.add(empresa_id)
-                empresa = analise.get("empresas", {})
+                analises_unicas.append(analise)
+
+            # 3) Agora ordena por nota_final para montar o ranking
+            analises_unicas.sort(key=lambda a: (a.get("nota_final") or 0), reverse=True)
+
+            # 4) Monta items (mesmo formato de antes)
+            items = []
+            notas = []
+
+            for analise in analises_unicas:
+                empresa_id = analise.get("empresa_id")
+                empresa = analise.get("empresas", {}) or {}
                 nota = analise.get("nota_final", 0) or 0
                 notas.append(nota)
-                
+
                 items.append({
                     "posicao": len(items) + 1,
                     "id": empresa_id,
@@ -259,16 +274,15 @@ class SupabaseService:
                     "classificacao_potencial": analise.get("classificacao_potencial", "medio"),
                     "faturamento_anual": empresa.get("faturamento_anual")
                 })
-                
-                # Para quando atingir o limite
+
                 if len(items) >= limite:
                     break
-            
-            # Calcula estatísticas
+
+            # 5) Estatísticas (igual antes)
             media = sum(notas) / len(notas) if notas else 0
             notas_sorted = sorted(notas)
             mediana = notas_sorted[len(notas_sorted)//2] if notas_sorted else 0
-            
+
             return {
                 "items": items,
                 "total": len(items),
@@ -281,7 +295,14 @@ class SupabaseService:
             return {"items": [], "total": 0, "media": 0, "mediana": 0, "desvio_padrao": 0}
 
     async def obter_ranking_setor(self, setor: str, limite: int = 50, offset: int = 0):
-        """Obtém ranking de empresas de um setor específico (sem duplicatas)"""
+        """
+        Obtém ranking de empresas de um setor específico.
+
+        ✅ CORREÇÃO: garante SEMPRE a análise mais recente por empresa.
+        - Busca por created_at desc (recência)
+        - Deduplica por empresa_id
+        - Depois ordena por nota_final desc
+        """
         try:
             # Primeiro busca empresas do setor
             empresas_result = (
@@ -290,37 +311,44 @@ class SupabaseService:
                 .eq("setor", setor)
                 .execute()
             )
-            
+
             empresa_ids = [e["id"] for e in (empresas_result.data or [])]
-            
+
             if not empresa_ids:
                 return {"items": [], "total": 0, "estatisticas": {}}
-            
-            # Busca análises dessas empresas
+
+            # 1) Busca análises dessas empresas ORDENANDO POR RECÊNCIA
             result = (
                 self.client.table("analises")
                 .select("*, empresas(*)")
                 .in_("empresa_id", empresa_ids)
                 .eq("status", "concluida")
-                .order("nota_final", desc=True)
+                .order("created_at", desc=True)
                 .execute()
             )
-            
-            # Remove duplicatas - mantém apenas a análise mais recente por empresa
+
+            # 2) Deduplica: mantém apenas a análise mais recente por empresa
             empresas_vistas = set()
-            items = []
-            
+            analises_unicas = []
             for analise in (result.data or []):
                 empresa_id = analise.get("empresa_id")
-                
-                # Pula se já vimos essa empresa
+                if not empresa_id:
+                    continue
                 if empresa_id in empresas_vistas:
                     continue
-                    
                 empresas_vistas.add(empresa_id)
-                empresa = analise.get("empresas", {})
+                analises_unicas.append(analise)
+
+            # 3) Ordena por nota_final para ranking
+            analises_unicas.sort(key=lambda a: (a.get("nota_final") or 0), reverse=True)
+
+            # 4) Monta items (mesmo formato de antes)
+            items = []
+            for analise in analises_unicas:
+                empresa_id = analise.get("empresa_id")
+                empresa = analise.get("empresas", {}) or {}
                 nota = analise.get("nota_final", 0) or 0
-                
+
                 items.append({
                     "posicao": len(items) + 1,
                     "id": empresa_id,
@@ -331,10 +359,10 @@ class SupabaseService:
                     "nota_final_percentual": nota * 25,
                     "classificacao_potencial": analise.get("classificacao_potencial", "medio")
                 })
-                
+
                 if len(items) >= limite:
                     break
-            
+
             return {"items": items, "total": len(items), "estatisticas": {}}
         except Exception as e:
             print(f"Erro obter_ranking_setor: {e}")
@@ -350,28 +378,28 @@ class SupabaseService:
                 .order("created_at", desc=True)
                 .execute()
             )
-            
+
             # Remove duplicatas - mantém apenas a análise mais recente por empresa
             empresas_vistas = set()
             analises_unicas = []
-            
+
             for analise in (result.data or []):
                 empresa_id = analise.get("empresa_id")
                 if empresa_id in empresas_vistas:
                     continue
                 empresas_vistas.add(empresa_id)
                 analises_unicas.append(analise)
-            
+
             # Agrupa por setor
             por_setor = {}
             for analise in analises_unicas:
                 setor = analise.get("empresas", {}).get("setor", "outro")
                 nota = analise.get("nota_final", 0) or 0
-                
+
                 if setor not in por_setor:
                     por_setor[setor] = []
                 por_setor[setor].append(nota)
-            
+
             estatisticas = []
             for setor, notas in por_setor.items():
                 if notas:
@@ -383,7 +411,7 @@ class SupabaseService:
                         "maior_nota": max(notas),
                         "desvio_padrao": 0
                     })
-            
+
             return estatisticas
         except Exception as e:
             print(f"Erro obter_estatisticas_setores: {e}")
@@ -405,36 +433,36 @@ class SupabaseService:
                 .select("*, empresas(*)")
                 .eq("status", "concluida")
             )
-            
+
             # Aplica filtros de nota
             if filtros.get("nota_minima"):
                 query = query.gte("nota_final", filtros["nota_minima"])
             if filtros.get("nota_maxima"):
                 query = query.lte("nota_final", filtros["nota_maxima"])
-            
+
             # Ordenação
             ordem = filtros.get("ordenar_por", "nota_final")
             direcao = filtros.get("ordem", "desc") == "desc"
             query = query.order(ordem, desc=direcao)
-            
+
             # Paginação
             limite = filtros.get("limite", 50)
             offset = filtros.get("offset", 0)
             query = query.range(offset, offset + limite - 1)
-            
+
             result = query.execute()
-            
+
             items = []
             for i, analise in enumerate(result.data or []):
                 empresa = analise.get("empresas", {})
-                
+
                 # Filtra por setores se especificado
                 if filtros.get("setores") and empresa.get("setor") not in filtros["setores"]:
                     continue
                 # Filtra por estágios se especificado
                 if filtros.get("estagios") and empresa.get("estagio") not in filtros["estagios"]:
                     continue
-                
+
                 nota = analise.get("nota_final", 0) or 0
                 items.append({
                     "posicao": i + 1,
@@ -444,7 +472,7 @@ class SupabaseService:
                     "nota_final": nota,
                     "nota_final_percentual": nota * 25
                 })
-            
+
             return {"items": items, "total": len(items), "estatisticas": {}}
         except Exception as e:
             print(f"Erro filtrar_ranking: {e}")
